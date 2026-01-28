@@ -1,4 +1,4 @@
-# TikTok Telegram Bot - Dependencies
+# RS TikTok Downloader - Dependencies
 # Python 3.9+ required
 
 python-telegram-bot>=21.0
