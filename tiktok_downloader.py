@@ -9,7 +9,7 @@ import requests
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, List
-from config import DOWNLOAD_DIR
+from config import DOWNLOAD_DIR, DEBUG_MODE
 
 
 @dataclass
@@ -25,6 +25,9 @@ class DownloadResult:
 
 def clean_downloads():
     """Clean all files in the download directory"""
+    if DEBUG_MODE:
+        return
+        
     for file in DOWNLOAD_DIR.glob("*"):
         try:
             file.unlink()
@@ -90,9 +93,19 @@ def transcode_and_normalize(video_path: Path):
             ffmpeg_cmd.extend(['-crf', '23'])
             
         ffmpeg_cmd.append(str(temp_output))
-        
         # Run ffmpeg
-        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+        result_ffmpeg = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+        
+        if DEBUG_MODE:
+            print("=== FFPROBE DATA ===")
+            print(json.dumps(probe_data, indent=2))
+            print(f"=== FFMPEG COMMAND ===\n{' '.join(ffmpeg_cmd)}")
+            print(f"=== FFMPEG STDERR ===\n{result_ffmpeg.stderr}")
+            if result_ffmpeg.returncode != 0:
+                print(f"FFmpeg exit code: {result_ffmpeg.returncode}")
+                
+        if result_ffmpeg.returncode != 0:
+            raise Exception(f"FFmpeg command failed with code {result_ffmpeg.returncode}")
         
         # Replace original file with transcoded one
         if temp_output.exists() and temp_output.stat().st_size > 0:
@@ -127,7 +140,7 @@ def get_tiktok_info(url: str) -> Optional[dict]:
     try:
         response = requests.post(
             api_url,
-            data={"url": url, "hd": 1},
+            data={"url": url, "hd": 0},  # Crucial: hd=0 prevents TikTok from serving experimental 'bvc2' codec which breaks FFmpeg
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "application/json",
@@ -138,6 +151,9 @@ def get_tiktok_info(url: str) -> Optional[dict]:
         data = response.json()
         
         if data.get("code") == 0 and data.get("data"):
+            if DEBUG_MODE:
+                print("=== TIKWM API RESPONSE ===")
+                print(json.dumps(data["data"], indent=2, ensure_ascii=True))
             return data["data"]
         else:
             return None
@@ -392,8 +408,7 @@ def download_all(url: str) -> DownloadResult:
 if __name__ == "__main__":
     # Test with sample URLs
     test_urls = [
-        "https://www.tiktok.com/@gosari542/video/7600030107658472722",
-        "https://vt.tiktok.com/ZSaUnMTho/"
+        "https://vt.tiktok.com/ZSmsnjuCG/"
     ]
     
     for test_url in test_urls:
@@ -404,10 +419,13 @@ if __name__ == "__main__":
         result = download_video(test_url)
         print(f"Success: {result.success}")
         print(f"Type: {result.content_type}")
-        print(f"Title: {result.title}")
-        print(f"Author: {result.author}")
+        print(f"Title: {result.title.encode('ascii', 'ignore').decode()}")
+        print(f"Author: {result.author.encode('ascii', 'ignore').decode()}")
         print(f"Files: {result.files}")
         if result.error:
             print(f"Error: {result.error}")
-        
-        clean_downloads()
+            
+        if DEBUG_MODE:
+            print(f"Archivo guardado localmente en la carpeta 'downloads' para inspección.")
+        else:
+            clean_downloads()
