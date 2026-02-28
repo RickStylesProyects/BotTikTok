@@ -4,6 +4,7 @@
 import re
 import os
 import asyncio
+import time
 import logging
 from pathlib import Path
 from telegram import Update, InputMediaPhoto, InputMediaVideo
@@ -104,17 +105,35 @@ async def audio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def process_audio_request(update: Update, url: str) -> None:
     """Process audio extraction request"""
     status_message = await update.message.reply_text(
-        "🎵 *Extrayendo audio...*\nEsto puede tomar unos segundos.",
+        "🎵 *Extrayendo audio...*\nIniciando proceso...",
         parse_mode=ParseMode.MARKDOWN
     )
     
     # Show typing action
     await update.message.chat.send_action(ChatAction.UPLOAD_VOICE)
     
+    # Variables for throttling progress updates
+    last_update_time = [0]
+    
+    def progress_callback(msg: str):
+        now = time.time()
+        # Update UI maximum once every 2.5 seconds to prevent Telegram flood limits
+        if now - last_update_time[0] > 2.5:
+            last_update_time[0] = now
+            # Schedule the coroutine in the main event loop
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.run_coroutine_threadsafe(
+                    status_message.edit_text(f"*(Procesando)*\n{msg}", parse_mode=ParseMode.MARKDOWN),
+                    loop
+                )
+            except Exception:
+                pass
+                
     try:
         # Download audio in thread pool
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, download_audio, url)
+        result = await loop.run_in_executor(None, lambda: download_audio(url, progress_callback))
         
         if result.success and result.files:
             audio_path = Path(result.files[0])
@@ -173,19 +192,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     # Send processing message
     status_message = await update.message.reply_text(
-        "⏳ *Descargando...*\nEsto puede tomar unos segundos.",
+        "⏳ *Iniciando Descarga...*",
         parse_mode=ParseMode.MARKDOWN
     )
     
     # Show typing action
     await update.message.chat.send_action(ChatAction.UPLOAD_VIDEO)
     
+    # Variable to throttle updates
+    last_update_time = [0]
+    
+    def progress_callback(msg: str):
+        now = time.time()
+        # Telegram API flood constraint: 1 edit every ~2.5 secs
+        if now - last_update_time[0] > 2.5:
+            last_update_time[0] = now
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.run_coroutine_threadsafe(
+                    status_message.edit_text(f"*(Procesando)*\n{msg}", parse_mode=ParseMode.MARKDOWN),
+                    loop
+                )
+            except Exception:
+                pass
+                
     try:
         # Download video in thread pool to avoid blocking
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, download_video, url)
+        result = await loop.run_in_executor(None, lambda: download_video(url, progress_callback))
         
         if result.success:
+            await status_message.edit_text("✅ *Alistando archivo para envío, espera...*", parse_mode=ParseMode.MARKDOWN)
             await send_content(update, result, status_message)
         else:
             await status_message.edit_text(

@@ -8,7 +8,7 @@ import subprocess
 import requests
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Callable
 from config import DOWNLOAD_DIR, DEBUG_MODE
 
 
@@ -35,7 +35,7 @@ def clean_downloads():
             pass
 
 
-def transcode_and_normalize(video_path: Path):
+def transcode_and_normalize(video_path: Path, progress_callback: Optional[Callable[[str], None]] = None):
     """
     Transcodes video to H.264 matching original bitrate and normalizes audio.
     Replaces original file if successful, otherwise keeps original.
@@ -94,18 +94,60 @@ def transcode_and_normalize(video_path: Path):
             
         ffmpeg_cmd.append(str(temp_output))
         # Run ffmpeg
-        result_ffmpeg = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+        
+        # Determine duration to calculate progress
+        duration_sec = 0
+        if probe_data.get('streams') and len(probe_data['streams']) > 0:
+            duration_str = probe_data['streams'][0].get('duration')
+            if duration_str:
+                try:
+                    duration_sec = float(duration_str)
+                except ValueError:
+                    pass
+        
+        if progress_callback:
+            progress_callback("⚙️ [2/2] Transcodificando a H.264... 0%")
+            
+        process = subprocess.Popen(
+            ffmpeg_cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT, 
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        stderr_output = []
+        for line in process.stdout:
+            stderr_output.append(line)
+            if DEBUG_MODE:
+                print(line, end="")
+            
+            # Parse time=00:00:03.57 to calculate percentage
+            if duration_sec > 0 and progress_callback and "time=" in line:
+                try:
+                    time_str = line.split("time=")[1].split(" ")[0]
+                    h, m, s = time_str.split(":")
+                    current_sec = int(h) * 3600 + int(m) * 60 + float(s)
+                    percent = min(100, int((current_sec / duration_sec) * 100))
+                    # Call callback only on significant leaps (every 5%) to reduce overhead
+                    if percent % 5 == 0:
+                        progress_callback(f"⚙️ [2/2] Transcodificando a H.264... {percent}%")
+                except Exception:
+                    pass
+                    
+        process.wait()
+        result_ffmpeg_code = process.returncode
         
         if DEBUG_MODE:
             print("=== FFPROBE DATA ===")
             print(json.dumps(probe_data, indent=2))
             print(f"=== FFMPEG COMMAND ===\n{' '.join(ffmpeg_cmd)}")
-            print(f"=== FFMPEG STDERR ===\n{result_ffmpeg.stderr}")
-            if result_ffmpeg.returncode != 0:
-                print(f"FFmpeg exit code: {result_ffmpeg.returncode}")
+            if result_ffmpeg_code != 0:
+                print(f"FFmpeg exit code: {result_ffmpeg_code}")
                 
-        if result_ffmpeg.returncode != 0:
-            raise Exception(f"FFmpeg command failed with code {result_ffmpeg.returncode}")
+        if result_ffmpeg_code != 0:
+            raise Exception(f"FFmpeg command failed with code {result_ffmpeg_code}")
         
         # Replace original file with transcoded one
         if temp_output.exists() and temp_output.stat().st_size > 0:
@@ -163,7 +205,7 @@ def get_tiktok_info(url: str) -> Optional[dict]:
         return None
 
 
-def download_file(url: str, filepath: Path) -> bool:
+def download_file(url: str, filepath: Path, progress_callback: Optional[Callable[[str], None]] = None) -> bool:
     """Download a file from URL to filepath"""
     try:
         response = requests.get(
@@ -175,18 +217,33 @@ def download_file(url: str, filepath: Path) -> bool:
             stream=True
         )
         response.raise_for_status()
+        # Get total file size if available
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        last_percent = 0
         
+        if progress_callback:
+            progress_callback(f"⏳ [1/2] Obteniendo medios de TikTok... 0%")
+            
         with open(filepath, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0 and progress_callback:
+                        percent = int((downloaded / total_size) * 100)
+                        # Report only every 10% to prevent telegram floor
+                        if percent >= last_percent + 10:
+                            last_percent = percent
+                            progress_callback(f"⏳ [1/2] Descargando de Servidores... {percent}%")
+                            
         return True
     except Exception as e:
         print(f"Error downloading file: {e}")
         return False
 
 
-def download_video(url: str) -> DownloadResult:
+def download_video(url: str, progress_callback: Optional[Callable[[str], None]] = None) -> DownloadResult:
     """
     Download TikTok video at best quality.
     Returns DownloadResult with file paths.
@@ -229,9 +286,9 @@ def download_video(url: str) -> DownloadResult:
         video_path = DOWNLOAD_DIR / f"{video_id}.mp4"
         files = []
         
-        if download_file(video_url, video_path):
+        if download_file(video_url, video_path, progress_callback):
             print(f"Video downloaded, starting transcoding & normalization for {video_path.name}")
-            transcode_and_normalize(video_path)
+            transcode_and_normalize(video_path, progress_callback)
             
             files.append(str(video_path))
             
@@ -266,7 +323,7 @@ def download_video(url: str) -> DownloadResult:
         )
 
 
-def download_slideshow_from_info(info: dict, title: str, author: str) -> DownloadResult:
+def download_slideshow_from_info(info: dict, title: str, author: str, progress_callback: Optional[Callable[[str], None]] = None) -> DownloadResult:
     """
     Download TikTok slideshow (images) and audio from API info.
     """
@@ -277,6 +334,8 @@ def download_slideshow_from_info(info: dict, title: str, author: str) -> Downloa
         
         # Download each image
         for i, img_url in enumerate(images):
+            if progress_callback:
+                progress_callback(f"⏳ Cosechando Imagen {i+1} de {len(images)}...")
             img_path = DOWNLOAD_DIR / f"{video_id}_{i+1}.jpg"
             if download_file(img_url, img_path):
                 files.append(str(img_path))
@@ -313,7 +372,7 @@ def download_slideshow_from_info(info: dict, title: str, author: str) -> Downloa
         )
 
 
-def download_slideshow(url: str) -> DownloadResult:
+def download_slideshow(url: str, progress_callback: Optional[Callable[[str], None]] = None) -> DownloadResult:
     """
     Download TikTok slideshow (images) and audio.
     """
@@ -330,11 +389,10 @@ def download_slideshow(url: str) -> DownloadResult:
     
     title = info.get("title", "TikTok Slideshow")[:100]
     author = info.get("author", {}).get("unique_id", "unknown")
-    
-    return download_slideshow_from_info(info, title, author)
+    return download_slideshow_from_info(info, title, author, progress_callback)
 
 
-def download_audio(url: str) -> DownloadResult:
+def download_audio(url: str, progress_callback: Optional[Callable[[str], None]] = None) -> DownloadResult:
     """
     Extract and download audio from TikTok video.
     Returns DownloadResult with audio file path.
@@ -372,7 +430,7 @@ def download_audio(url: str) -> DownloadResult:
         # Download audio
         audio_path = DOWNLOAD_DIR / f"{video_id}_audio.mp3"
         
-        if download_file(music_url, audio_path):
+        if download_file(music_url, audio_path, progress_callback):
             return DownloadResult(
                 success=True,
                 content_type='audio',
@@ -397,12 +455,12 @@ def download_audio(url: str) -> DownloadResult:
         )
 
 
-def download_all(url: str) -> DownloadResult:
+def download_all(url: str, progress_callback: Optional[Callable[[str], None]] = None) -> DownloadResult:
     """
     Download video/slideshow and audio from TikTok.
     Automatically detects content type and downloads appropriately.
     """
-    return download_video(url)
+    return download_video(url, progress_callback)
 
 
 if __name__ == "__main__":
