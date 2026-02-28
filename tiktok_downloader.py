@@ -71,8 +71,11 @@ def transcode_and_normalize(video_path: Path):
         
         ffmpeg_cmd = [
             'ffmpeg', '-y', '-i', str(video_path),
+            '-map', '0:v?', '-map', '0:a?',  # Ensures both video and optional audio streams are taken
             '-c:v', 'libx264',
             '-preset', 'fast',
+            '-profile:v', 'main',  # Best balance between high and baseline for telegram compatibility
+            '-pix_fmt', 'yuv420p',  # Fixes "blank/green video" issues in modern players with HDR/10-bit sources
             '-c:a', 'aac',
             '-af', 'loudnorm=I=-16:LRA=11:TP=-1.5'  # Standard audio normalization
         ]
