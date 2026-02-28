@@ -114,6 +114,7 @@ async def process_audio_request(update: Update, url: str) -> None:
     
     # Variables for throttling progress updates
     last_update_time = [0]
+    main_loop = asyncio.get_running_loop()
     
     def progress_callback(msg: str):
         now = time.time()
@@ -122,18 +123,16 @@ async def process_audio_request(update: Update, url: str) -> None:
             last_update_time[0] = now
             # Schedule the coroutine in the main event loop
             try:
-                loop = asyncio.get_running_loop()
                 asyncio.run_coroutine_threadsafe(
                     status_message.edit_text(f"*(Procesando)*\n{msg}", parse_mode=ParseMode.MARKDOWN),
-                    loop
+                    main_loop
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error in audio progress callback: {e}")
                 
     try:
         # Download audio in thread pool
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, lambda: download_audio(url, progress_callback))
+        result = await main_loop.run_in_executor(None, lambda: download_audio(url, progress_callback))
         
         if result.success and result.files:
             audio_path = Path(result.files[0])
@@ -201,6 +200,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     # Variable to throttle updates
     last_update_time = [0]
+    main_loop = asyncio.get_running_loop()
     
     def progress_callback(msg: str):
         now = time.time()
@@ -208,18 +208,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if now - last_update_time[0] > 2.5:
             last_update_time[0] = now
             try:
-                loop = asyncio.get_running_loop()
                 asyncio.run_coroutine_threadsafe(
                     status_message.edit_text(f"*(Procesando)*\n{msg}", parse_mode=ParseMode.MARKDOWN),
-                    loop
+                    main_loop
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error in video progress callback: {e}")
                 
     try:
         # Download video in thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, lambda: download_video(url, progress_callback))
+        result = await main_loop.run_in_executor(None, lambda: download_video(url, progress_callback))
         
         if result.success:
             await status_message.edit_text("✅ *Alistando archivo para envío, espera...*", parse_mode=ParseMode.MARKDOWN)
