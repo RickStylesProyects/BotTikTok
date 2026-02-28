@@ -3,6 +3,9 @@
 
 FROM python:3.11-slim
 
+# Install system dependencies (FFmpeg for video transcoding)
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
 # Create non-root user (required by HF Spaces)
 RUN useradd -m -u 1000 user
 
