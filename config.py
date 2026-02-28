@@ -6,6 +6,7 @@ from pathlib import Path
 # Bot Configuration
 BOT_TOKEN = "8218958423:AAEQaY7q1eN7Xb1umG5G98cE7fFfqPummtI"
 BOT_USERNAME = "@tiktokrs_bot"
+DEBUG_MODE = False
 
 # Paths
 BASE_DIR = Path(__file__).parent
