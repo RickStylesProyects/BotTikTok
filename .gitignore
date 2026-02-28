@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+venv2/
+ENV/
+
+# Downloads
+downloads/
+
+# Secrets / Keys
+*.key
+*.pem
+*.pub
+
+# IDEs
+.vscode/
+.idea/
