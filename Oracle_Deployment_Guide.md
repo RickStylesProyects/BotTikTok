@@ -34,7 +34,24 @@ Si el SSH local falla por firewall, usa la consola web de Oracle:
 
 ---
 
-## 2. Preparación del Sistema
+## 2. Configuración de Red (IP Fija o Reservada)
+*Nota: Si tu IP cambia, el comando SSH que tenías dejará de funcionar. Se recomienda usar una IP reservada de Oracle para que sea permanente.*
+
+Para asignar una IP reservada:
+1. En Oracle Cloud, ve al panel de tu cuenta y busca la instancia (`Compute` > `Instances`).
+2. Entra a tu Servidor Ubuntu.
+3. Baja por el menú lateral izquierdo hasta **Resources** (Recursos) y haz clic en **Attached VNICs**.
+4. Haz clic en el nombre de la red principal.
+5. Luego, en el panel izquierdo haz clic en **IPv4 Addresses**.
+6. En la IP temporal (efímera) que aparece, haz clic en los `...` de la derecha y dale a **Edit**.
+7. Marca **No public IP** y guarda. Esto liberará la IP cambiante temporal.
+8. Una vez guardado, dale nuevamente a los `...` > **Edit**.
+9. Selecciona **Reserved public IP** y escoge tu nueva IP estática del listado de IP ya reservadas (ej. `129.213.187.174`).
+10. Ahora siempre podrás entrar con `ssh -i "tu_llave.key" ubuntu@129.213.187.174`.
+
+---
+
+## 3. Preparación del Sistema
 
 Una vez dentro del servidor, ejecuta estos comandos uno por uno.
 

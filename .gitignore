@@ -22,3 +22,6 @@ downloads/
 # IDEs
 .vscode/
 .idea/
+
+# Documentos locales (Guía Privada)
+Oracle_Deployment_Guide.md
