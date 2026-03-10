@@ -11,6 +11,14 @@ from dataclasses import dataclass
 from typing import Optional, List, Callable
 from config import DOWNLOAD_DIR, DEBUG_MODE
 
+# Opcional: importar bmf si est\u00e1 disponible para decodificaci\u00f3n ByteVC2
+try:
+    import bmf
+    HAS_BMF = True
+except ImportError:
+    HAS_BMF = False
+    print("BMF no est\u00e1 instalado. Decodificaci\u00f3n bvc2 nativa deshabilitada.")
+
 
 @dataclass
 class DownloadResult:
@@ -35,13 +43,93 @@ def clean_downloads():
             pass
 
 
+def detect_video_codec(video_path: Path) -> str:
+    """Detects the video codec using ffprobe"""
+    try:
+        probe_cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-select_streams', 'v:0', str(video_path)
+        ]
+        result = subprocess.run(probe_cmd, capture_output=True, text=True)
+        probe_data = json.loads(result.stdout)
+        
+        if probe_data.get('streams') and len(probe_data['streams']) > 0:
+            return probe_data['streams'][0].get('codec_name', 'unknown')
+        return 'unknown'
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"Error detectando codec: {e}")
+        return 'unknown'
+
+
+def transcode_with_bmf(video_path: Path, output_path: Path, progress_callback: Optional[Callable[[str], None]] = None) -> bool:
+    """Uses BMF to decode ByteVC2 and encode to H.264"""
+    if not HAS_BMF:
+        raise Exception("BMF no est\u00e1 instalado.")
+        
+    if progress_callback:
+        progress_callback("\u2699\ufe0f [2/2] Transcodificando ByteVC2 con BMF...")
+        
+    try:
+        # BMF Graph construction
+        graph = bmf.graph()
+        
+        # Decode input
+        video = graph.decode({"input_path": str(video_path)})
+        
+        # Audio normalization string
+        audio_filter = "loudnorm=I=-16:LRA=11:TP=-1.5"
+        
+        # Encode output
+        bmf.encode(
+            video['video'],
+            video['audio'],
+            {
+                "output_path": str(output_path),
+                "video_params": {
+                    "codec": "libx264",
+                    "preset": "fast",
+                    "profile": "main",
+                    "pix_fmt": "yuv420p",
+                    "crf": "23" # Fallback if we don't set exact bitrate
+                },
+                "audio_params": {
+                    "codec": "aac",
+                    "af": audio_filter
+                }
+            }
+        ).run()
+        
+        return True
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"BMF transcode error: {e}")
+        raise e
+
+
 def transcode_and_normalize(video_path: Path, progress_callback: Optional[Callable[[str], None]] = None):
     """
-    Transcodes video to H.264 matching original bitrate and normalizes audio.
+    Conditionally transcodes video based on codec, and always normalizes audio.
     Replaces original file if successful, otherwise keeps original.
     """
+    codec = detect_video_codec(video_path)
+    if DEBUG_MODE:
+        print(f"Detectado codec: {codec} para {video_path.name}")
+        
+    temp_output = video_path.with_name(f"temp_{video_path.name}")
+    
     try:
-        # Get exact original video bitrate using ffprobe
+        if codec in ['bvc2', 'bytevc2', 'unknown'] and HAS_BMF:
+            if progress_callback:
+                progress_callback(f"\u2699\ufe0f Codificaci\u00f3n {codec} detectada. Usando BMF...")
+            transcode_with_bmf(video_path, temp_output, progress_callback)
+            
+            if temp_output.exists() and temp_output.stat().st_size > 0:
+                video_path.unlink()
+                temp_output.rename(video_path)
+            return
+            
+        # Get exact original video bitrate using ffprobe for FFmpeg
         probe_cmd = [
             'ffprobe', '-v', 'quiet', '-print_format', 'json', 
             '-show_streams', '-select_streams', 'v:0', str(video_path)
@@ -70,30 +158,39 @@ def transcode_and_normalize(video_path: Path, progress_callback: Optional[Callab
             except json.JSONDecodeError:
                 pass
                 
-        temp_output = video_path.with_name(f"temp_{video_path.name}")
-        
         ffmpeg_cmd = [
             'ffmpeg', '-y', '-i', str(video_path),
-            '-map', '0:v?', '-map', '0:a?',  # Ensures both video and optional audio streams are taken
-            '-c:v', 'libx264',
-            '-preset', 'fast',
-            '-profile:v', 'main',  # Best balance between high and baseline for telegram compatibility
-            '-pix_fmt', 'yuv420p',  # Fixes "blank/green video" issues in modern players with HDR/10-bit sources
-            '-c:a', 'aac',
-            '-af', 'loudnorm=I=-16:LRA=11:TP=-1.5'  # Standard audio normalization
+            '-map', '0:v?', '-map', '0:a?'  # Ensures both video and optional audio streams are taken
         ]
         
-        if bitrate: # Try to maintain exact original bitrate
+        # Conditional video transcoding
+        if codec == 'h264':
+            # Skip video transcoding, just copy
+            ffmpeg_cmd.extend(['-c:v', 'copy'])
+        else:
+            # Transcode to h264
             ffmpeg_cmd.extend([
-                '-b:v', str(bitrate),
-                '-maxrate', str(bitrate),
-                '-bufsize', str(int(bitrate) * 2)
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-profile:v', 'main',
+                '-pix_fmt', 'yuv420p'
             ])
-        else: # Fallback
-            ffmpeg_cmd.extend(['-crf', '23'])
+            if bitrate:
+                ffmpeg_cmd.extend([
+                    '-b:v', str(bitrate),
+                    '-maxrate', str(bitrate),
+                    '-bufsize', str(int(bitrate) * 2)
+                ])
+            else:
+                ffmpeg_cmd.extend(['-crf', '23'])
+                
+        # Always normalize audio
+        ffmpeg_cmd.extend([
+            '-c:a', 'aac',
+            '-af', 'loudnorm=I=-16:LRA=11:TP=-1.5'
+        ])
             
         ffmpeg_cmd.append(str(temp_output))
-        # Run ffmpeg
         
         # Determine duration to calculate progress
         duration_sec = 0
@@ -106,7 +203,10 @@ def transcode_and_normalize(video_path: Path, progress_callback: Optional[Callab
                     pass
         
         if progress_callback:
-            progress_callback("⚙️ [2/2] Transcodificando a H.264... 0%")
+            if codec == 'h264':
+                progress_callback("\u2699\ufe0f [2/2] Normalizando audio (Video H.264 listo)... 0%")
+            else:
+                progress_callback("\u2699\ufe0f [2/2] Transcodificando a H.264... 0%")
             
         process = subprocess.Popen(
             ffmpeg_cmd, 
@@ -123,16 +223,17 @@ def transcode_and_normalize(video_path: Path, progress_callback: Optional[Callab
             if DEBUG_MODE:
                 print(line, end="")
             
-            # Parse time=00:00:03.57 to calculate percentage
             if duration_sec > 0 and progress_callback and "time=" in line:
                 try:
                     time_str = line.split("time=")[1].split(" ")[0]
                     h, m, s = time_str.split(":")
                     current_sec = int(h) * 3600 + int(m) * 60 + float(s)
                     percent = min(100, int((current_sec / duration_sec) * 100))
-                    # Call callback only on significant leaps (every 5%) to reduce overhead
                     if percent % 5 == 0:
-                        progress_callback(f"⚙️ [2/2] Transcodificando a H.264... {percent}%")
+                        if codec == 'h264':
+                            progress_callback(f"\u2699\ufe0f [2/2] Normalizando audio... {percent}%")
+                        else:
+                            progress_callback(f"\u2699\ufe0f [2/2] Transcodificando a H.264... {percent}%")
                 except Exception:
                     pass
                     
@@ -140,9 +241,6 @@ def transcode_and_normalize(video_path: Path, progress_callback: Optional[Callab
         result_ffmpeg_code = process.returncode
         
         if DEBUG_MODE:
-            print("=== FFPROBE DATA ===")
-            print(json.dumps(probe_data, indent=2))
-            print(f"=== FFMPEG COMMAND ===\n{' '.join(ffmpeg_cmd)}")
             if result_ffmpeg_code != 0:
                 print(f"FFmpeg exit code: {result_ffmpeg_code}")
                 
@@ -154,13 +252,13 @@ def transcode_and_normalize(video_path: Path, progress_callback: Optional[Callab
             video_path.unlink()
             temp_output.rename(video_path)
     except Exception as e:
-        print(f"Transcoding error (keeping original file): {e}")
-        temp_output = video_path.with_name(f"temp_{video_path.name}")
+        print(f"Transcoding error: {e}")
         if temp_output.exists():
             try:
                 temp_output.unlink()
             except Exception:
                 pass
+        raise e
 
 
 def extract_video_id(url: str) -> Optional[str]:
@@ -172,7 +270,7 @@ def extract_video_id(url: str) -> Optional[str]:
     return None
 
 
-def get_tiktok_info(url: str) -> Optional[dict]:
+def get_tiktok_info(url: str, hd: int = 1) -> Optional[dict]:
     """
     Get TikTok video info using tikwm.com API
     Returns video data including download URLs
@@ -182,7 +280,7 @@ def get_tiktok_info(url: str) -> Optional[dict]:
     try:
         response = requests.post(
             api_url,
-            data={"url": url, "hd": 0},  # Crucial: hd=0 prevents TikTok from serving experimental 'bvc2' codec which breaks FFmpeg
+            data={"url": url, "hd": hd},
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "application/json",
@@ -288,7 +386,34 @@ def download_video(url: str, progress_callback: Optional[Callable[[str], None]] 
         
         if download_file(video_url, video_path, progress_callback):
             print(f"Video downloaded, starting transcoding & normalization for {video_path.name}")
-            transcode_and_normalize(video_path, progress_callback)
+            
+            try:
+                transcode_and_normalize(video_path, progress_callback)
+            except Exception as e:
+                print(f"Transcoding failed completely: {e}")
+                # Fallback to hd=0 if transcoding failed
+                if "No se encontr\u00f3 URL de descarga" not in str(e):
+                    if progress_callback:
+                        progress_callback("\u26a0\ufe0f Codificaci\u00f3n no soportada/Fallo de memoria. Reintentando con calidad est\u00e1ndar...")
+                    
+                    # Try again with hd=0
+                    info_sd = get_tiktok_info(url, hd=0)
+                    if info_sd:
+                        video_url_sd = info_sd.get("play")
+                        if video_url_sd:
+                            # Remove the bad HD file before downloading SD
+                            if video_path.exists():
+                                try:
+                                    video_path.unlink()
+                                except Exception:
+                                    pass
+                                    
+                            if download_file(video_url_sd, video_path, progress_callback):
+                                # Try standard transcoding one more time
+                                try:
+                                    transcode_and_normalize(video_path, progress_callback)
+                                except Exception:
+                                    pass # Just keep whatever we got if it still fails
             
             files.append(str(video_path))
             
